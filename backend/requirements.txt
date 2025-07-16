@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+aiosqlite
+python-dotenv
+docker
+python-multipart
+aiofiles
+greenlet==1.1.3

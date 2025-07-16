@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount the host's Docker socket into the container
+      # This allows the backend to start other containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persist the SQLite database
+      - pyconnect_data:/app
+    environment:
+      # Tell the DB to use the volume path with standard SQLite
+      - DATABASE_URL=sqlite:///app/pyconnect.db
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      # Use a target to install deps without starting the dev server
+      target: deps
+    ports:
+      - "5173:5173"
+    volumes:
+      # Mount source code for hot-reloading
+      - ./frontend:/app
+      # Prevent node_modules on host from overwriting container's
+      - /app/node_modules
+    command: npm run dev -- --host
+
+volumes:
+  pyconnect_data:
