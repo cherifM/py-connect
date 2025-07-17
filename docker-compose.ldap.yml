@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      - PORT=8000
+      - AUTH_METHOD=ldap
+      - LDAP_SERVER_URI=${LDAP_SERVER_URI:-ldap://openldap:389}
+      - LDAP_BIND_DN=${LDAP_BIND_DN:-cn=admin,dc=example,dc=com}
+      - LDAP_BIND_PASSWORD=${LDAP_BIND_PASSWORD:-admin}
+      - LDAP_USER_SEARCH_BASE=${LDAP_USER_SEARCH_BASE:-ou=users,dc=example,dc=com}
+    depends_on:
+      - db
+      - openldap
+    volumes:
+      - ./backend:/app
+      - pyconnect-data:/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      - VITE_API_URL=http://localhost:${BACKEND_PORT:-8000}/api
+    depends_on:
+      - backend
+
+  db:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=pyconnect
+      - POSTGRES_PASSWORD=pyconnect
+      - POSTGRES_DB=pyconnect
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  openldap:
+    image: osixia/openldap:1.5.0
+    ports:
+      - "389:389"
+      - "636:636"
+    environment:
+      - LDAP_ORGANISATION=Example Inc.
+      - LDAP_DOMAIN=example.com
+      - LDAP_ADMIN_PASSWORD=admin
+      - LDAP_CONFIG_PASSWORD=config
+    volumes:
+      - ./ldap/ldif:/container/service/slapd/assets/config/bootstrap/ldif/custom
+      - ldap-data:/var/lib/ldap
+      - ldap-config:/etc/ldap/slapd.d
+
+  phpldapadmin:
+    image: osixia/phpldapadmin:0.9.0
+    ports:
+      - "8080:80"
+    environment:
+      - PHPLDAPADMIN_LDAP_HOSTS=openldap
+      - PHPLDAPADMIN_HTTPS=false
+    depends_on:
+      - openldap
+
+volumes:
+  postgres-data:
+  ldap-data:
+  ldap-config:
+  pyconnect-data:

@@ -3,6 +3,7 @@ import shutil
 import uuid
 import logging
 import zipfile
+from datetime import timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -15,16 +16,27 @@ from fastapi import (
     HTTPException, 
     BackgroundTasks,
     status,
-    Query
+    Query,
+    Request,
+    Response
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.encoders import jsonable_encoder
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from contextlib import contextmanager
 
-from . import crud, models, schemas, services
+from . import crud, models, schemas, services, auth
 from .database import get_db, init_db, Base
+from .auth import (
+    authenticate_user,
+    create_access_token,
+    get_current_user,
+    get_current_active_user,
+    get_current_admin_user,
+    ACCESS_TOKEN_EXPIRE_MINUTES
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,23 +49,40 @@ init_db()
 UPLOAD_DIR = Path("/tmp/pyconnect_uploads")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+# Security configuration
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here")
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
 # Create FastAPI app
 app = FastAPI(
     title="Py-Connect API",
-    description="Backend API for Py-Connect application deployment",
+    description="Backend API for Py-Connect application deployment with LDAP support",
     version="1.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
-    openapi_url="/api/openapi.json"
+    openapi_url="/api/openapi.json",
+    swagger_ui_parameters={"defaultModelsExpandDepth": -1}
 )
+
+# Security models
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+
+class UserInDB(models.User):
+    hashed_password: str
 
 # --- CORS Middleware ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Frontend URL
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 # Database session dependency
@@ -134,15 +163,59 @@ def deploy_in_background(content_id: int, zip_path: Path) -> None:
             except Exception as e:
                 logger.error(f"Error cleaning up file {zip_path}: {str(e)}", exc_info=True)
 
+# --- Authentication Endpoints ---
+@app.post("/api/token", response_model=Token)
+async def login_for_access_token(
+    response: Response,
+    form_data: OAuth2PasswordRequestForm = Depends()
+):
+    """
+    OAuth2 compatible token login, get an access token for future requests
+    """
+    user = authenticate_user(form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    
+    # Set HttpOnly cookie for better security
+    response.set_cookie(
+        key="access_token",
+        value=f"Bearer {access_token}",
+        httponly=True,
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        secure=os.getenv("ENVIRONMENT") == "production",
+        samesite="lax"
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/api/logout")
+async def logout(response: Response):
+    """Logout by clearing the access token cookie"""
+    response.delete_cookie(key="access_token")
+    return {"message": "Successfully logged out"}
+
+# --- Protected Endpoints ---
 @app.post(
     "/api/publish",
     response_model=schemas.ContentInDB,
     status_code=status.HTTP_202_ACCEPTED,
     responses={
         400: {"description": "Content with this name already exists"},
+        401: {"description": "Not authenticated"},
+        403: {"description": "Not enough permissions"},
         422: {"description": "Validation error"},
         500: {"description": "Failed to process upload"}
-    }
+    },
+    dependencies=[Depends(get_current_active_user)]
 )
 async def publish_content(
     background_tasks: BackgroundTasks,
@@ -228,7 +301,7 @@ async def publish_content(
     "/api/content",
     response_model=List[schemas.ContentInDB],
     summary="List all content items",
-    description="Get a list of all deployed content with pagination"
+    dependencies=[Depends(get_current_active_user)]
 )
 def list_content(
     skip: int = Query(0, ge=0, description="Number of items to skip"),
@@ -254,9 +327,12 @@ def list_content(
     "/api/content/{content_id}",
     response_model=schemas.ContentInDB,
     responses={
+        401: {"description": "Not authenticated"},
         404: {"description": "Content not found"},
         422: {"description": "Validation error"}
-    }
+    },
+    summary="Get content by ID",
+    dependencies=[Depends(get_current_active_user)]
 )
 def get_content(
     content_id: int = Path(description="ID of the content to retrieve", gt=0),
@@ -286,13 +362,16 @@ def get_content(
 
 @app.delete(
     "/api/content/{content_id}",
-    status_code=status.HTTP_200_OK,
-    response_model=Dict[str, str],
+    status_code=status.HTTP_204_NO_CONTENT,
     responses={
+        401: {"description": "Not authenticated"},
+        403: {"description": "Not enough permissions"},
         404: {"description": "Content not found"},
-        500: {"description": "Error deleting content"},
+        500: {"description": "Error deleting content or container"},
         422: {"description": "Validation error"}
-    }
+    },
+    summary="Delete content by ID",
+    dependencies=[Depends(get_current_admin_user)]
 )
 def delete_content(
     content_id: int = Path(description="ID of the content to delete", gt=0),
@@ -353,7 +432,19 @@ async def health_check():
     Returns:
         A simple status message indicating the service is running
     """
-    return {"status": "ok", "service": "py-connect-backend"}
+    return {
+        "status": "ok",
+        "service": "py-connect-backend",
+        "version": app.version,
+        "environment": os.getenv("ENVIRONMENT", "development")
+    }
+
+@app.get("/api/me", response_model=schemas.User)
+async def read_users_me(current_user: models.User = Depends(get_current_active_user)):
+    """
+    Get current user information
+    """
+    return current_user
 
 # Add startup event to ensure upload directory exists
 @app.on_event("startup")

@@ -1,0 +1,50 @@
+# Base DN
+dn: dc=example,dc=com
+objectClass: top
+objectClass: dcObject
+objectclass: organization
+o: Example Organization
+dc: example
+
+description: LDAP Root
+
+# Admin user
+dn: cn=admin,dc=example,dc=com
+objectclass: organizationalRole
+cn: admin
+description: LDAP administrator
+
+# Organizational Units
+dn: ou=users,dc=example,dc=com
+objectClass: organizationalUnit
+ou: users
+
+dn: ou=groups,dc=example,dc=com
+objectClass: organizationalUnit
+ou: groups
+
+# Groups
+dn: cn=admins,ou=groups,dc=example,dc=com
+objectClass: groupOfNames
+cn: admins
+description: System Administrators
+member: cn=admin,dc=example,dc=com
+
+# Test Users
+dn: uid=testuser,ou=users,dc=example,dc=com
+objectClass: inetOrgPerson
+objectClass: posixAccount
+objectClass: shadowAccount
+uid: testuser
+cn: Test User
+sn: User
+givenName: Test
+mail: test@example.com
+uidNumber: 10000
+gidNumber: 5000
+loginShell: /bin/bash
+homeDirectory: /home/testuser
+userPassword: {SSHA}5en6G6MezRroT3XKqkdpoZm9P7oSCQ==  # password: testpass
+
+# Add testuser to admins group
+member: uid=testuser,ou=users,dc=example,dc=com
